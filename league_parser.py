@@ -1,76 +1,16 @@
 import os
 import re
 import json
-import requests
 
 os.environ["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = "True"
 
 from paddleocr import PaddleOCR
 
-# =========================
-# CONFIG
-# =========================
-IMAGE_PATH = "league3.png"
-MATCH_ID = "ffbac0e5-246c-4ab8-ac96-5bcb5690d73c"
-GAME_NUMBER = 1
-API_URL = "http://localhost:3000/api/ingest-match-game"
-REQUEST_TIMEOUT_SECONDS = 30
 
 ocr = PaddleOCR(
     lang="ch",
     enable_mkldnn=False,
 )
-
-result = ocr.predict(IMAGE_PATH)
-
-items = []
-
-for line in result:
-    boxes = line.get("rec_boxes", [])
-    texts = line.get("rec_texts", [])
-
-    for box, text in zip(boxes, texts):
-        text = text.strip()
-        if not text:
-            continue
-
-        try:
-            if len(box) == 4 and not hasattr(box[0], "__len__"):
-                x = int(box[0])
-                y = int(box[1])
-            else:
-                x = int(box[0][0])
-                y = int(box[0][1])
-        except Exception:
-            continue
-
-        items.append({
-            "text": text,
-            "x": x,
-            "y": y,
-        })
-
-items.sort(key=lambda i: (i["y"], i["x"]))
-
-rows = []
-current_row = []
-row_threshold = 40
-
-for item in items:
-    if not current_row:
-        current_row.append(item)
-        continue
-
-    if abs(item["y"] - current_row[0]["y"]) <= row_threshold:
-        current_row.append(item)
-    else:
-        rows.append(sorted(current_row, key=lambda i: i["x"]))
-        current_row = [item]
-
-if current_row:
-    rows.append(sorted(current_row, key=lambda i: i["x"]))
-
-print("ROWS DETECTED:", len(rows))
 
 
 def row_texts(row):
@@ -399,178 +339,216 @@ def extract_duration_minutes(rows):
     return None
 
 
-print("\nOCR ROWS:")
-for idx, row in enumerate(rows):
-    print(f"ROW {idx}: {row_join(row)}")
+def build_rows_from_result(result):
+    items = []
 
-headers = extract_team_headers(rows)
+    for line in result:
+        boxes = line.get("rec_boxes", [])
+        texts = line.get("rec_texts", [])
 
-print("\nTEAM HEADERS FOUND:")
-for h in headers:
-    print({
-        "row_index": h["row_index"],
-        "texts": h["texts"],
-        "stats": h["stats"],
-    })
+        for box, text in zip(boxes, texts):
+            text = text.strip()
+            if not text:
+                continue
 
-top_team = None
-bottom_team = None
+            try:
+                if len(box) == 4 and not hasattr(box[0], "__len__"):
+                    x = int(box[0])
+                    y = int(box[1])
+                else:
+                    x = int(box[0][0])
+                    y = int(box[0][1])
+            except Exception:
+                continue
 
-if len(headers) >= 2:
-    top_team = headers[0]["stats"]
-    bottom_team = headers[1]["stats"]
+            items.append({
+                "text": text,
+                "x": x,
+                "y": y,
+            })
 
-    print("\nTOP TEAM:")
-    print(top_team)
+    items.sort(key=lambda i: (i["y"], i["x"]))
 
-    print("\nBOTTOM TEAM:")
-    print(bottom_team)
-else:
-    print("\nCould not confidently extract both team headers.")
+    rows = []
+    current_row = []
+    row_threshold = 40
 
-player_blocks = []
+    for item in items:
+        if not current_row:
+            current_row.append(item)
+            continue
 
-for i in range(len(rows) - 1):
-    merged = merge_rows(rows[i], rows[i + 1])
+        if abs(item["y"] - current_row[0]["y"]) <= row_threshold:
+            current_row.append(item)
+        else:
+            rows.append(sorted(current_row, key=lambda i: i["x"]))
+            current_row = [item]
 
-    if not is_player_block(merged):
-        continue
+    if current_row:
+        rows.append(sorted(current_row, key=lambda i: i["x"]))
 
-    name = extract_name(merged)
-    triplet = choose_best_triplet(extract_triplet_candidates(merged))
-    gd = choose_best_gold_damage(extract_gold_damage_candidates(merged))
+    return rows
 
-    if not name or not triplet:
-        continue
 
-    player_blocks.append({
-        "name": name,
-        "kills": triplet["kills"],
-        "deaths": triplet["deaths"],
-        "assists": triplet["assists"],
-        "gold": gd["gold"] if gd else None,
-        "damage": gd["damage"] if gd else None,
-        "gold_raw": gd["gold_raw"] if gd else None,
-        "damage_raw": gd["damage_raw"] if gd else None,
-        "triplet_text": triplet["source_text"],
-        "gold_damage_text": gd["source_text"] if gd else None,
-        "block_y": min(item["y"] for item in merged),
-        "source_rows": [i, i + 1],
-    })
+def parse_image(image_path, match_id, game_number):
+    if not image_path:
+        raise ValueError("image_path is required")
 
-players = sorted(
-    {p["name"]: p for p in player_blocks}.values(),
-    key=lambda x: x["block_y"]
-)
+    if not match_id:
+        raise ValueError("match_id is required")
 
-players = attach_badges(players, rows)
+    if game_number is None:
+        raise ValueError("game_number is required")
 
-print("\nPLAYERS FOUND:")
-for p in players:
-    print(p)
+    result = ocr.predict(image_path)
+    rows = build_rows_from_result(result)
 
-if len(players) != 10:
-    print(f"\nExpected 10 players, found {len(players)}")
-    raise SystemExit(1)
+    print("ROWS DETECTED:", len(rows))
 
-if top_team is None or bottom_team is None:
-    print("\nCould not confidently extract both team headers.")
-    raise SystemExit(1)
+    print("\nOCR ROWS:")
+    for idx, row in enumerate(rows):
+        print(f"ROW {idx}: {row_join(row)}")
 
-winners = players[:5]
-losers = players[5:]
+    headers = extract_team_headers(rows)
 
-print("\nWINNING TEAM PLAYERS:")
-for p in winners:
-    print({
-        "name": p["name"],
-        "kills": p["kills"],
-        "deaths": p["deaths"],
-        "assists": p["assists"],
-        "gold": p["gold"],
-        "damage": p["damage"],
-        "isMVP": p["isMVP"],
-        "isSVP": p["isSVP"],
-    })
+    print("\nTEAM HEADERS FOUND:")
+    for h in headers:
+        print({
+            "row_index": h["row_index"],
+            "texts": h["texts"],
+            "stats": h["stats"],
+        })
 
-print("\nLOSING TEAM PLAYERS:")
-for p in losers:
-    print({
-        "name": p["name"],
-        "kills": p["kills"],
-        "deaths": p["deaths"],
-        "assists": p["assists"],
-        "gold": p["gold"],
-        "damage": p["damage"],
-        "isMVP": p["isMVP"],
-        "isSVP": p["isSVP"],
-    })
+    top_team = None
+    bottom_team = None
 
-duration_minutes = extract_duration_minutes(rows)
+    if len(headers) >= 2:
+        top_team = headers[0]["stats"]
+        bottom_team = headers[1]["stats"]
 
-payload = {
-    "matchId": MATCH_ID,
-    "gameNumber": GAME_NUMBER,
-    "topTeam": top_team,
-    "bottomTeam": bottom_team,
-    "durationMinutes": duration_minutes,
-    "winningPlayers": [
-        {
-            "name": p["name"],
-            "kills": p["kills"],
-            "deaths": p["deaths"],
-            "assists": p["assists"],
-            "gold": p["gold"],
-            "damage": p["damage"],
-            "isMVP": p["isMVP"],
-            "isSVP": p["isSVP"],
-        }
-        for p in winners
-    ],
-    "losingPlayers": [
-        {
-            "name": p["name"],
-            "kills": p["kills"],
-            "deaths": p["deaths"],
-            "assists": p["assists"],
-            "gold": p["gold"],
-            "damage": p["damage"],
-            "isMVP": p["isMVP"],
-            "isSVP": p["isSVP"],
-        }
-        for p in losers
-    ],
-}
+        print("\nTOP TEAM:")
+        print(top_team)
 
-print("\nPARSED MATCH SUMMARY:")
-print(json.dumps(payload, indent=2, ensure_ascii=False))
+        print("\nBOTTOM TEAM:")
+        print(bottom_team)
+    else:
+        print("\nCould not confidently extract both team headers.")
 
-if MATCH_ID == "PUT-YOUR-MATCH-ID-HERE":
-    print("\nERROR: Please replace MATCH_ID at the top of the file before posting.")
-    raise SystemExit(1)
+    player_blocks = []
 
-print(f"\nPOSTING TO API: {API_URL}")
+    for i in range(len(rows) - 1):
+        merged = merge_rows(rows[i], rows[i + 1])
 
-try:
-    response = requests.post(
-        API_URL,
-        json=payload,
-        timeout=REQUEST_TIMEOUT_SECONDS,
+        if not is_player_block(merged):
+            continue
+
+        name = extract_name(merged)
+        triplet = choose_best_triplet(extract_triplet_candidates(merged))
+        gd = choose_best_gold_damage(extract_gold_damage_candidates(merged))
+
+        if not name or not triplet:
+            continue
+
+        player_blocks.append({
+            "name": name,
+            "kills": triplet["kills"],
+            "deaths": triplet["deaths"],
+            "assists": triplet["assists"],
+            "gold": gd["gold"] if gd else None,
+            "damage": gd["damage"] if gd else None,
+            "gold_raw": gd["gold_raw"] if gd else None,
+            "damage_raw": gd["damage_raw"] if gd else None,
+            "triplet_text": triplet["source_text"],
+            "gold_damage_text": gd["source_text"] if gd else None,
+            "block_y": min(item["y"] for item in merged),
+            "source_rows": [i, i + 1],
+        })
+
+    players = sorted(
+        {p["name"]: p for p in player_blocks}.values(),
+        key=lambda x: x["block_y"]
     )
 
-    print(f"STATUS: {response.status_code}")
+    players = attach_badges(players, rows)
 
-    try:
-        response_json = response.json()
-        print("RESPONSE JSON:")
-        print(json.dumps(response_json, indent=2, ensure_ascii=False))
-    except Exception:
-        print("RESPONSE TEXT:")
-        print(response.text)
+    print("\nPLAYERS FOUND:")
+    for p in players:
+        print(p)
 
-    response.raise_for_status()
-    print("\nSUCCESS: OCR payload posted to ingest API.")
-except requests.RequestException as e:
-    print("\nFAILED TO POST TO API:")
-    print(str(e))
-    raise SystemExit(1)
+    if len(players) != 10:
+        print(f"\nExpected 10 players, found {len(players)}")
+        raise ValueError(f"Expected 10 players, found {len(players)}")
+
+    if top_team is None or bottom_team is None:
+        print("\nCould not confidently extract both team headers.")
+        raise ValueError("Could not confidently extract both team headers")
+
+    winners = players[:5]
+    losers = players[5:]
+
+    print("\nWINNING TEAM PLAYERS:")
+    for p in winners:
+        print({
+            "name": p["name"],
+            "kills": p["kills"],
+            "deaths": p["deaths"],
+            "assists": p["assists"],
+            "gold": p["gold"],
+            "damage": p["damage"],
+            "isMVP": p["isMVP"],
+            "isSVP": p["isSVP"],
+        })
+
+    print("\nLOSING TEAM PLAYERS:")
+    for p in losers:
+        print({
+            "name": p["name"],
+            "kills": p["kills"],
+            "deaths": p["deaths"],
+            "assists": p["assists"],
+            "gold": p["gold"],
+            "damage": p["damage"],
+            "isMVP": p["isMVP"],
+            "isSVP": p["isSVP"],
+        })
+
+    duration_minutes = extract_duration_minutes(rows)
+
+    payload = {
+        "matchId": match_id,
+        "gameNumber": game_number,
+        "topTeam": top_team,
+        "bottomTeam": bottom_team,
+        "durationMinutes": duration_minutes,
+        "winningPlayers": [
+            {
+                "name": p["name"],
+                "kills": p["kills"],
+                "deaths": p["deaths"],
+                "assists": p["assists"],
+                "gold": p["gold"],
+                "damage": p["damage"],
+                "isMVP": p["isMVP"],
+                "isSVP": p["isSVP"],
+            }
+            for p in winners
+        ],
+        "losingPlayers": [
+            {
+                "name": p["name"],
+                "kills": p["kills"],
+                "deaths": p["deaths"],
+                "assists": p["assists"],
+                "gold": p["gold"],
+                "damage": p["damage"],
+                "isMVP": p["isMVP"],
+                "isSVP": p["isSVP"],
+            }
+            for p in losers
+        ],
+    }
+
+    print("\nPARSED MATCH SUMMARY:")
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+
+    return payload
