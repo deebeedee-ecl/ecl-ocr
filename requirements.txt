@@ -2,3 +2,4 @@ paddleocr
 paddlepaddle
 requests
 flask
+gunicorn
