@@ -401,6 +401,7 @@ def parse_image(image_path, match_id, game_number):
         raise ValueError("game_number is required")
 
     result = ocr.predict(image_path)
+    print("✅ Raw OCR result received", flush=True)
     rows = build_rows_from_result(result)
 
     print("ROWS DETECTED:", len(rows))
