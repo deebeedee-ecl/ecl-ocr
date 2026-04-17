@@ -28,49 +28,47 @@ def run_ocr():
     started_at = time.time()
 
     try:
-        print("📥 /ocr request received")
+        print("📥 /ocr request received", flush=True)
 
         data = request.get_json(silent=True) or {}
-        print("📦 Request JSON:", data)
+        print("📦 Request JSON:", data, flush=True)
 
         match_id = data.get("matchId")
         game_number = data.get("gameNumber")
         screenshot_url = data.get("screenshotUrl")
 
         if not match_id or game_number is None or not screenshot_url:
-            print("❌ Missing required fields")
+            print("❌ Missing required fields", flush=True)
             return jsonify({
                 "success": False,
                 "error": "Missing matchId, gameNumber, or screenshotUrl",
             }), 400
 
-        filename = f"{uuid.uuid4()}.png"
+        filename = f"{uuid.uuid4()}.jpg"
         temp_filepath = os.path.join(UPLOAD_DIR, filename)
 
-        print("🌐 Downloading image:", screenshot_url)
+        print("🌐 Downloading image:", screenshot_url, flush=True)
         image_response = requests.get(
             screenshot_url,
             timeout=30,
-            headers={
-                "User-Agent": "Mozilla/5.0 ECL-OCR-Service"
-            },
+            headers={"User-Agent": "Mozilla/5.0 ECL-OCR-Service"},
         )
         image_response.raise_for_status()
 
         with open(temp_filepath, "wb") as f:
             f.write(image_response.content)
 
-        print("✅ Image downloaded to:", temp_filepath)
+        print("✅ Image downloaded:", temp_filepath, flush=True)
 
-        print("🧠 Starting OCR parse...")
+        print("🧠 Starting OCR parse...", flush=True)
         payload = league_parser.parse_image(
             image_path=temp_filepath,
             match_id=match_id,
             game_number=game_number,
         )
-        print("✅ OCR parse finished")
+        print("✅ OCR parse finished", flush=True)
 
-        print("📤 Posting payload to ingest API:", INGEST_API_URL)
+        print("📤 Posting payload to ingest API:", INGEST_API_URL, flush=True)
         ingest_response = requests.post(
             INGEST_API_URL,
             json=payload,
@@ -82,13 +80,13 @@ def run_ocr():
         except Exception:
             response_body = ingest_response.text
 
-        print("📨 Ingest status:", ingest_response.status_code)
-        print("📨 Ingest response:", response_body)
+        print("📨 Ingest status:", ingest_response.status_code, flush=True)
+        print("📨 Ingest response:", response_body, flush=True)
 
         ingest_response.raise_for_status()
 
         total_time = round(time.time() - started_at, 2)
-        print(f"✅ /ocr finished in {total_time}s")
+        print(f"✅ /ocr finished in {total_time}s", flush=True)
 
         return jsonify({
             "success": True,
@@ -100,7 +98,7 @@ def run_ocr():
 
     except Exception as e:
         total_time = round(time.time() - started_at, 2)
-        print(f"❌ /ocr failed after {total_time}s:", str(e))
+        print(f"❌ /ocr failed after {total_time}s: {str(e)}", flush=True)
         return jsonify({
             "success": False,
             "error": str(e),
@@ -111,6 +109,6 @@ def run_ocr():
         if temp_filepath and os.path.exists(temp_filepath):
             try:
                 os.remove(temp_filepath)
-                print("🧹 Temp file removed:", temp_filepath)
+                print("🧹 Temp file removed:", temp_filepath, flush=True)
             except Exception as cleanup_err:
-                print("⚠️ Failed to remove temp file:", str(cleanup_err))
+                print("⚠️ Failed to remove temp file:", str(cleanup_err), flush=True)
