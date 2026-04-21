@@ -23,7 +23,8 @@ def row_join(row):
 
 def normalize_text(text):
     return (
-        text.replace("（", "(")
+        str(text)
+        .replace("（", "(")
         .replace("）", ")")
         .replace("／", "/")
         .replace("＃", "#")
@@ -39,7 +40,7 @@ def merge_rows(a, b):
 
 
 def extract_name(merged_items):
-    texts = [i["text"] for i in merged_items]
+    texts = [normalize_text(i["text"]) for i in merged_items]
     joined = " ".join(texts)
 
     full = re.search(r"([^\s#]{1,40}#[0-9]{4,8})", joined)
@@ -78,10 +79,10 @@ def choose_best_triplet(candidates):
     if not candidates:
         return None
 
-    preferred = [c for c in candidates if 300 <= c["x"] <= 700]
+    preferred = [c for c in candidates if 300 <= c["x"] <= 760]
 
     if preferred:
-        preferred.sort(key=lambda c: c["x"])
+        preferred.sort(key=lambda c: abs(c["x"] - 520))
         return preferred[0]
 
     candidates.sort(key=lambda c: abs(c["x"] - 520))
@@ -95,29 +96,124 @@ def is_player_block(merged_items):
     return has_name and has_triplet
 
 
+def parse_k_value_to_int(raw):
+    raw = normalize_text(raw).lower().replace(" ", "")
+    try:
+        if raw.endswith("k"):
+            return int(round(float(raw[:-1]) * 1000))
+        return int(float(raw))
+    except Exception:
+        return None
+
+
+def extract_gold_damage_candidates(merged_items):
+    candidates = []
+
+    pattern = re.compile(r"\((\d+(?:\.\d+)?)k/(\d+(?:\.\d+)?)k\)", re.IGNORECASE)
+
+    for item in merged_items:
+        text = normalize_text(item["text"])
+
+        for m in pattern.finditer(text):
+            gold_raw = f"{m.group(1)}k"
+            damage_raw = f"{m.group(2)}k"
+
+            gold = parse_k_value_to_int(gold_raw)
+            damage = parse_k_value_to_int(damage_raw)
+
+            candidates.append({
+                "gold": gold,
+                "damage": damage,
+                "gold_raw": gold_raw,
+                "damage_raw": damage_raw,
+                "x": item["x"],
+                "y": item["y"],
+                "source_text": item["text"],
+            })
+
+    return candidates
+
+
+def choose_best_gold_damage(candidates):
+    if not candidates:
+        return None
+
+    preferred = [c for c in candidates if 250 <= c["x"] <= 980]
+
+    if preferred:
+        preferred.sort(key=lambda c: abs(c["x"] - 700))
+        return preferred[0]
+
+    candidates.sort(key=lambda c: abs(c["x"] - 700))
+    return candidates[0]
+
+
+def row_contains_mvp(row):
+    joined = "".join(row_texts(row))
+    return "MVP" in joined.upper()
+
+
+def row_contains_svp(row):
+    joined = "".join(row_texts(row))
+    return "SVP" in joined.upper()
+
+
+def attach_badges(players, rows):
+    if not players:
+        return players
+
+    for p in players:
+        p["isMVP"] = False
+        p["isSVP"] = False
+
+    badge_rows = []
+
+    for idx, row in enumerate(rows):
+        if row_contains_mvp(row):
+            badge_rows.append((idx, "MVP"))
+        if row_contains_svp(row):
+            badge_rows.append((idx, "SVP"))
+
+    for badge_row_idx, badge_type in badge_rows:
+        target = None
+        best_distance = None
+
+        for p in players:
+            # Use the player's main block row as the anchor.
+            player_row_center = (p["source_rows"][0] + p["source_rows"][1]) / 2
+            distance = abs(player_row_center - badge_row_idx)
+
+            if best_distance is None or distance < best_distance:
+                best_distance = distance
+                target = p
+
+        if target:
+            if badge_type == "MVP":
+                target["isMVP"] = True
+            elif badge_type == "SVP":
+                target["isSVP"] = True
+
+    return players
+
+
 def extract_digits_for_objectives(token):
     token = normalize_text(token)
-
     if not token:
         return []
 
-    parts = [p for p in re.split(r"\s+", token) if p]
+    # Ignore obvious non-objective text
+    if "伤转" in token or "钱/伤" in token or "无段位" in token:
+        return []
 
-    if len(parts) > 1:
-        if re.fullmatch(r"[\d\s]+", token):
-            digits = re.findall(r"\d", token)
-            return [int(digits[-1])] if digits else []
+    # Pull out standalone digits first
+    standalone = re.findall(r"(?<!\d)(\d)(?!\d)", token)
+    if standalone:
+        return [int(x) for x in standalone]
 
-        out = []
-        for part in parts:
-            digits = re.findall(r"\d", part)
-            if digits:
-                out.append(int(digits[-1]))
-        return out
-
+    # Fallback: if OCR stuck several digits together, split them
     digits = re.findall(r"\d", token)
     if digits:
-        return [int(digits[-1])]
+        return [int(x) for x in digits]
 
     return []
 
@@ -153,13 +249,10 @@ def extract_header_stats_from_row(row):
 
     for t in normalized[kda_index + 1:]:
         if "伤转" in t or "钱/伤" in t:
-            continue
+            break
 
         nums = re.findall(r"\d+", t)
-        if not nums:
-            continue
-
-        if gold is None:
+        if gold is None and nums:
             gold = int(max(nums, key=len))
             continue
 
@@ -205,125 +298,7 @@ def extract_team_headers(rows):
     return headers
 
 
-def parse_k_value_to_int(raw):
-    raw = raw.lower().replace(" ", "")
-    try:
-        if raw.endswith("k"):
-            return int(round(float(raw[:-1]) * 1000))
-        return int(float(raw))
-    except Exception:
-        return None
-
-
-def extract_gold_damage_candidates(merged_items):
-    """
-    Looks for strings like:
-    1.168(12.6k/28.1k)
-    0.768(11.1k/17k)
-
-    First number inside parens = player gold
-    Second number inside parens = damage dealt
-    """
-    candidates = []
-
-    pattern = re.compile(r"\((\d+(?:\.\d+)?)k/(\d+(?:\.\d+)?)k\)", re.IGNORECASE)
-
-    for item in merged_items:
-        text = normalize_text(item["text"])
-
-        for m in pattern.finditer(text):
-            gold_raw = f"{m.group(1)}k"
-            damage_raw = f"{m.group(2)}k"
-
-            gold = parse_k_value_to_int(gold_raw)
-            damage = parse_k_value_to_int(damage_raw)
-
-            candidates.append({
-                "gold": gold,
-                "damage": damage,
-                "gold_raw": gold_raw,
-                "damage_raw": damage_raw,
-                "x": item["x"],
-                "y": item["y"],
-                "source_text": item["text"],
-            })
-
-    return candidates
-
-
-def choose_best_gold_damage(candidates):
-    if not candidates:
-        return None
-
-    preferred = [c for c in candidates if 250 <= c["x"] <= 900]
-
-    if preferred:
-        preferred.sort(key=lambda c: c["x"])
-        return preferred[0]
-
-    candidates.sort(key=lambda c: abs(c["x"] - 650))
-    return candidates[0]
-
-
-def row_contains_mvp(row):
-    joined = "".join(row_texts(row))
-    return "MVP" in joined.upper()
-
-
-def row_contains_svp(row):
-    joined = "".join(row_texts(row))
-    return "SVP" in joined.upper()
-
-
-def attach_badges(players, rows):
-    """
-    Heuristic for this layout:
-    - MVP row appears between player 1 and player 2 area, but belongs to player 1
-    - SVP row appears between player 2 and player 3 area on losing side, but belongs to player 2
-    """
-    if not players:
-        return players
-
-    mvp_rows = []
-    svp_rows = []
-
-    for idx, row in enumerate(rows):
-        if row_contains_mvp(row):
-            mvp_rows.append(idx)
-        if row_contains_svp(row):
-            svp_rows.append(idx)
-
-    for p in players:
-        p["isMVP"] = False
-        p["isSVP"] = False
-
-    for badge_row in mvp_rows:
-        target = None
-        for p in players:
-            if p["source_rows"][1] < badge_row:
-                target = p
-        if target:
-            target["isMVP"] = True
-
-    for badge_row in svp_rows:
-        target = None
-        for p in players:
-            if p["source_rows"][1] < badge_row:
-                target = p
-        if target:
-            target["isSVP"] = True
-
-    return players
-
-
 def extract_duration_minutes(rows):
-    """
-    Looks for patterns like:
-    用时32分52秒
-    32分52秒
-
-    Returns minutes only (int)
-    """
     for row in rows:
         joined = "".join(row_texts(row))
         normalized = normalize_text(joined)
@@ -390,55 +365,51 @@ def build_rows_from_result(result):
     return rows
 
 
-def parse_image(image_path, match_id, game_number):
-    if not image_path:
-        raise ValueError("image_path is required")
+def unique_players_by_name(players):
+    best = {}
 
-    if not match_id:
-        raise ValueError("match_id is required")
+    for p in players:
+        name = p["name"]
 
-    if game_number is None:
-        raise ValueError("game_number is required")
+        if name not in best:
+            best[name] = p
+            continue
 
-    result = ocr.predict(image_path)
-    print("✅ Raw OCR result received", flush=True)
-    rows = build_rows_from_result(result)
+        current_score = 0
+        if p.get("gold") is not None:
+            current_score += 1
+        if p.get("damage") is not None:
+            current_score += 1
+        if p.get("isMVP"):
+            current_score += 1
+        if p.get("isSVP"):
+            current_score += 1
 
-    print("ROWS DETECTED:", len(rows))
+        previous = best[name]
+        previous_score = 0
+        if previous.get("gold") is not None:
+            previous_score += 1
+        if previous.get("damage") is not None:
+            previous_score += 1
+        if previous.get("isMVP"):
+            previous_score += 1
+        if previous.get("isSVP"):
+            previous_score += 1
 
-    print("\nOCR ROWS:")
-    for idx, row in enumerate(rows):
-        print(f"ROW {idx}: {row_join(row)}")
+        if current_score > previous_score:
+            best[name] = p
 
-    headers = extract_team_headers(rows)
+    return sorted(best.values(), key=lambda x: x["block_y"])
 
-    print("\nTEAM HEADERS FOUND:")
-    for h in headers:
-        print({
-            "row_index": h["row_index"],
-            "texts": h["texts"],
-            "stats": h["stats"],
-        })
 
-    top_team = None
-    bottom_team = None
-
-    if len(headers) >= 2:
-        top_team = headers[0]["stats"]
-        bottom_team = headers[1]["stats"]
-
-        print("\nTOP TEAM:")
-        print(top_team)
-
-        print("\nBOTTOM TEAM:")
-        print(bottom_team)
-    else:
-        print("\nCould not confidently extract both team headers.")
-
+def build_side_player_blocks(side_rows, base_row_index):
     player_blocks = []
 
-    for i in range(len(rows) - 1):
-        merged = merge_rows(rows[i], rows[i + 1])
+    for local_i in range(len(side_rows) - 1):
+        row_a = side_rows[local_i]
+        row_b = side_rows[local_i + 1]
+
+        merged = merge_rows(row_a, row_b)
 
         if not is_player_block(merged):
             continue
@@ -462,30 +433,91 @@ def parse_image(image_path, match_id, game_number):
             "triplet_text": triplet["source_text"],
             "gold_damage_text": gd["source_text"] if gd else None,
             "block_y": min(item["y"] for item in merged),
-            "source_rows": [i, i + 1],
+            "source_rows": [base_row_index + local_i, base_row_index + local_i + 1],
         })
 
-    players = sorted(
-        {p["name"]: p for p in player_blocks}.values(),
-        key=lambda x: x["block_y"]
-    )
+    players = unique_players_by_name(player_blocks)
+    players = attach_badges(players, side_rows)
 
-    players = attach_badges(players, rows)
+    return players
 
-    print("\nPLAYERS FOUND:")
-    for p in players:
-        print(p)
 
-    if len(players) != 10:
-        print(f"\nExpected 10 players, found {len(players)}")
-        raise ValueError(f"Expected 10 players, found {len(players)}")
+def parse_image(image_path, match_id, game_number):
+    if not image_path:
+        raise ValueError("image_path is required")
 
-    if top_team is None or bottom_team is None:
-        print("\nCould not confidently extract both team headers.")
+    if not match_id:
+        raise ValueError("match_id is required")
+
+    if game_number is None:
+        raise ValueError("game_number is required")
+
+    result = ocr.predict(image_path)
+    print("✅ Raw OCR result received", flush=True)
+
+    rows = build_rows_from_result(result)
+
+    print("ROWS DETECTED:", len(rows))
+    print("\nOCR ROWS:")
+    for idx, row in enumerate(rows):
+        print(f"ROW {idx}: {row_join(row)}")
+
+    headers = extract_team_headers(rows)
+
+    print("\nTEAM HEADERS FOUND:")
+    for h in headers:
+        print({
+            "row_index": h["row_index"],
+            "texts": h["texts"],
+            "stats": h["stats"],
+        })
+
+    if len(headers) < 2:
         raise ValueError("Could not confidently extract both team headers")
 
-    winners = players[:5]
-    losers = players[5:]
+    top_header = headers[0]
+    bottom_header = headers[1]
+
+    top_team = top_header["stats"]
+    bottom_team = bottom_header["stats"]
+
+    print("\nTOP TEAM:")
+    print(top_team)
+
+    print("\nBOTTOM TEAM:")
+    print(bottom_team)
+
+    top_start = top_header["row_index"] + 1
+    top_end = bottom_header["row_index"]
+    bottom_start = bottom_header["row_index"] + 1
+    bottom_end = len(rows)
+
+    top_side_rows = rows[top_start:top_end]
+    bottom_side_rows = rows[bottom_start:bottom_end]
+
+    top_players = build_side_player_blocks(top_side_rows, top_start)
+    bottom_players = build_side_player_blocks(bottom_side_rows, bottom_start)
+
+    print("\nTOP SIDE PLAYERS:")
+    for p in top_players:
+        print(p)
+
+    print("\nBOTTOM SIDE PLAYERS:")
+    for p in bottom_players:
+        print(p)
+
+    if len(top_players) != 5:
+        raise ValueError(f"Expected 5 top-side players, found {len(top_players)}")
+
+    if len(bottom_players) != 5:
+        raise ValueError(f"Expected 5 bottom-side players, found {len(bottom_players)}")
+
+    if top_team["isWinner"]:
+        winners = top_players
+        losers = bottom_players
+    else:
+        winners = bottom_players
+        losers = top_players
 
     print("\nWINNING TEAM PLAYERS:")
     for p in winners:
